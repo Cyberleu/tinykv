@@ -90,6 +90,7 @@ func TestLeaderElection2AA(t *testing.T) {
 		tt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 		sm := tt.network.peers[1].(*Raft)
 		if sm.State != tt.state {
+			t.Errorf("#%d: Lenvotes %d, Lenpeers %d", i, len(sm.votes), len(sm.peers))
 			t.Errorf("#%d: state = %s, want %s", i, sm.State, tt.state)
 		}
 		if g := sm.Term; g != tt.expTerm {
@@ -109,6 +110,7 @@ func TestLeaderCycle2AA(t *testing.T) {
 
 		for _, peer := range n.peers {
 			sm := peer.(*Raft)
+			// t.Errorf("current node %d state = %v", sm.id, sm.State)
 			if sm.id == campaignerID && sm.State != StateLeader {
 				t.Errorf("campaigning node %d state = %v, want StateLeader",
 					sm.id, sm.State)
@@ -191,6 +193,8 @@ func TestLeaderElectionOverwriteNewerLogs2AB(t *testing.T) {
 func TestVoteFromAnyState2AA(t *testing.T) {
 	vt := pb.MessageType_MsgRequestVote
 	vt_resp := pb.MessageType_MsgRequestVoteResponse
+	var cnt int
+	cnt = 0
 	for st := StateType(0); st <= StateLeader; st++ {
 		r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 		r.Term = 1
@@ -219,31 +223,32 @@ func TestVoteFromAnyState2AA(t *testing.T) {
 			Index:   42,
 		}
 		if err := r.Step(msg); err != nil {
-			t.Errorf("%s,%s: Step failed: %s", vt, st, err)
+			t.Errorf("%d,%s,%s: Step failed: %s", cnt, vt, st, err)
 		}
 		if len(r.msgs) != 1 {
-			t.Errorf("%s,%s: %d response messages, want 1: %+v", vt, st, len(r.msgs), r.msgs)
+			t.Errorf("%d,%s,%s: %d response messages, want 1: %+v", cnt, vt, st, len(r.msgs), r.msgs)
 		} else {
 			resp := r.msgs[0]
 			if resp.MsgType != vt_resp {
-				t.Errorf("%s,%s: response message is %s, want %s",
-					vt, st, resp.MsgType, vt_resp)
+				t.Errorf("%d,%s,%s: response message is %s, want %s",
+					cnt, vt, st, resp.MsgType, vt_resp)
 			}
 			if resp.Reject {
-				t.Errorf("%s,%s: unexpected rejection", vt, st)
+				t.Errorf("%d,%s,%s: unexpected rejection", cnt, vt, st)
 			}
 		}
 
 		// If this was a vote, we reset our state and term.
 		if r.State != StateFollower {
-			t.Errorf("%s,%s: state %s, want %s", vt, st, r.State, StateFollower)
+			t.Errorf("%d,%s,%s: state %s, want %s", cnt, vt, st, r.State, StateFollower)
 		}
 		if r.Term != newTerm {
-			t.Errorf("%s,%s: term %d, want %d", vt, st, r.Term, newTerm)
+			t.Errorf("%d,%s,%s: term %d, want %d", cnt, vt, st, r.Term, newTerm)
 		}
 		if r.Vote != 2 {
-			t.Errorf("%s,%s: vote %d, want 2", vt, st, r.Vote)
+			t.Errorf("%d,%s,%s: vote %d, want 2", cnt, vt, st, r.Vote)
 		}
+		cnt++
 	}
 }
 
@@ -562,10 +567,10 @@ func TestProposal2AB(t *testing.T) {
 }
 
 // TestHandleMessageType_MsgAppend ensures:
-// 1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
-// 2. If an existing entry conflicts with a new one (same index but different terms),
-//    delete the existing entry and all that follow it; append any new entries not already in the log.
-// 3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
+//  1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
+//  2. If an existing entry conflicts with a new one (same index but different terms),
+//     delete the existing entry and all that follow it; append any new entries not already in the log.
+//  3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
 func TestHandleMessageType_MsgAppend2AB(t *testing.T) {
 	tests := []struct {
 		m       pb.Message
