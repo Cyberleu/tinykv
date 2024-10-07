@@ -155,7 +155,15 @@ func TestLeaderElectionOverwriteNewerLogs2AB(t *testing.T) {
 	// Node 1 campaigns. The election fails because a quorum of nodes
 	// know about the election that already happened at term 2. Node 1's
 	// term is pushed ahead to 2.
+	// for i := range n.peers {
+	// 	sm := n.peers[i].(*Raft)
+	// 	t.Errorf("before node: %d, state: %s, term: %d, vote: %d", i, sm.State, sm.Term, sm.Vote)
+	// }
 	n.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
+	// for i := range n.peers {
+	// 	sm := n.peers[i].(*Raft)
+	// 	t.Errorf("after node: %d, state: %s, term: %d, vote: %d", i, sm.State, sm.Term, sm.Vote)
+	// }
 	sm1 := n.peers[1].(*Raft)
 	if sm1.State != StateFollower {
 		t.Errorf("state = %s, want StateFollower", sm1.State)

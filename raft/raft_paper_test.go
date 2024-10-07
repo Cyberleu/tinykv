@@ -411,7 +411,6 @@ func TestLeaderCommitEntry2AB(t *testing.T) {
 	commitNoopEntry(r, s)
 	li := r.RaftLog.LastIndex()
 	r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("some data")}}})
-
 	for _, m := range r.readMessages() {
 		r.Step(acceptAndReply(m))
 	}
@@ -424,6 +423,7 @@ func TestLeaderCommitEntry2AB(t *testing.T) {
 		t.Errorf("nextEnts = %+v, want %+v", g, wents)
 	}
 	msgs := r.readMessages()
+
 	sort.Sort(messageSlice(msgs))
 	for i, m := range msgs {
 		if w := uint64(i + 2); m.To != w {
@@ -902,8 +902,10 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 		r.sendAppend(id)
 	}
 	// simulate the response of MessageType_MsgAppend
+
 	msgs := r.readMessages()
 	for _, m := range msgs {
+		print("type: ", m.MsgType)
 		if m.MsgType != pb.MessageType_MsgAppend || len(m.Entries) != 1 || m.Entries[0].Data != nil {
 			panic("not a message to append noop entry")
 		}
