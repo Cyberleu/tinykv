@@ -90,7 +90,6 @@ func TestLeaderElection2AA(t *testing.T) {
 		tt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 		sm := tt.network.peers[1].(*Raft)
 		if sm.State != tt.state {
-			t.Errorf("#%d: Lenvotes %d, Lenpeers %d", i, len(sm.votes), len(sm.peers))
 			t.Errorf("#%d: state = %s, want %s", i, sm.State, tt.state)
 		}
 		if g := sm.Term; g != tt.expTerm {
@@ -157,12 +156,14 @@ func TestLeaderElectionOverwriteNewerLogs2AB(t *testing.T) {
 	// term is pushed ahead to 2.
 	// for i := range n.peers {
 	// 	sm := n.peers[i].(*Raft)
-	// 	t.Errorf("before node: %d, state: %s, term: %d, vote: %d", i, sm.State, sm.Term, sm.Vote)
+	// 	entries := sm.RaftLog.allEntries()
+	// 	t.Errorf("before node %d: len(entries) == %d, want 2", i, len(entries))
 	// }
 	n.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 	// for i := range n.peers {
 	// 	sm := n.peers[i].(*Raft)
-	// 	t.Errorf("after node: %d, state: %s, term: %d, vote: %d", i, sm.State, sm.Term, sm.Vote)
+	// 	entries := sm.RaftLog.allEntries()
+	// 	t.Errorf("after node %d: len(entries) == %d, want 2", i, len(entries))
 	// }
 	sm1 := n.peers[1].(*Raft)
 	if sm1.State != StateFollower {
@@ -174,6 +175,11 @@ func TestLeaderElectionOverwriteNewerLogs2AB(t *testing.T) {
 
 	// Node 1 campaigns again with a higher term. This time it succeeds.
 	n.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
+	// for i := range n.peers {
+	// 	sm := n.peers[i].(*Raft)
+	// 	entries := sm.RaftLog.allEntries()
+	// 	t.Errorf("after node %d: len(entries) == %d, want 2", i, len(entries))
+	// }
 	if sm1.State != StateLeader {
 		t.Errorf("state = %s, want StateLeader", sm1.State)
 	}
@@ -187,7 +193,7 @@ func TestLeaderElectionOverwriteNewerLogs2AB(t *testing.T) {
 		sm := n.peers[i].(*Raft)
 		entries := sm.RaftLog.allEntries()
 		if len(entries) != 2 {
-			t.Fatalf("node %d: len(entries) == %d, want 2", i, len(entries))
+			t.Errorf("node %d: len(entries) == %d, want 2", i, len(entries))
 		}
 		if entries[0].Term != 1 {
 			t.Errorf("node %d: term at index 1 == %d, want 1", i, entries[0].Term)

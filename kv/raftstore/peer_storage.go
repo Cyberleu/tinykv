@@ -261,7 +261,7 @@ func (ps *PeerStorage) clearExtraData(newRegion *metapb.Region) {
 	if bytes.Compare(oldStartKey, newStartKey) < 0 {
 		ps.clearRange(newRegion.Id, oldStartKey, newStartKey)
 	}
-	if bytes.Compare(newEndKey, oldEndKey) < 0 || (len(oldEndKey) == 0 && len(newEndKey) != 0) {
+	if bytes.Compare(newEndKey, oldEndKey) < 0 {
 		ps.clearRange(newRegion.Id, newEndKey, oldEndKey)
 	}
 }
@@ -308,6 +308,36 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	if len(entries) <= 0 {
+		return nil
+	}
+	psFirst, _ := ps.FirstIndex()
+	psLast, _ := ps.LastIndex()
+	appendFirst := entries[0].Index
+	appendLast := entries[len(entries)-1].Index
+	// no need to append
+	if appendLast < psFirst {
+		return nil
+	}
+	// only need entries not in storage
+	if appendFirst < psFirst {
+		entries = entries[psFirst-appendFirst:]
+	}
+	// append raft log
+	for _, e := range entries {
+		raftWB.SetMeta(meta.RaftLogKey(ps.region.GetId(), e.Index), &e)
+	}
+	// delete any previously appended log entries which will never be committed.
+	if appendLast < psLast {
+		for index := appendLast + 1; index <= psLast; index += 1 {
+			raftWB.DeleteMeta(meta.RaftLogKey(ps.region.GetId(), index))
+		}
+	}
+
+	// update ps raft state
+	ps.raftState.LastIndex = appendLast
+	ps.raftState.LastTerm = entries[len(entries)-1].Term
+	// call WriteToDB after call this method.
 	return nil
 }
 
@@ -323,7 +353,36 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+	// delete stale data
+	if ps.isInitialized() {
+		if err := ps.clearMeta(kvWB, raftWB); err != nil {
+			return nil, err
+		}
+		ps.clearExtraData(snapData.Region)
+	}
+	// update states
+	ps.raftState.LastIndex = snapshot.Metadata.Index
+	ps.raftState.LastTerm = snapshot.Metadata.Term
+	ps.applyState.AppliedIndex = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
+	ps.snapState.StateType = snap.SnapState_Applying
+	kvWB.SetMeta(meta.ApplyStateKey(snapData.Region.GetId()), ps.applyState)
+	// send RegionTaskApply and wait
+	ch := make(chan bool, 1)
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: ps.region.GetId(),
+		Notifier: ch,
+		SnapMeta: snapshot.Metadata,
+		StartKey: snapData.Region.GetStartKey(),
+		EndKey:   snapData.Region.GetEndKey(),
+	}
+	result := &ApplySnapResult{
+		PrevRegion: ps.region,
+		Region:     snapData.Region,
+	}
+	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
+	return result, nil
 }
 
 // Save memory states to disk.
@@ -331,7 +390,24 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
-	return nil, nil
+	raftWB := &engine_util.WriteBatch{}
+	var result *ApplySnapResult
+	var err error
+	// apply snapshot
+	if !raft.IsEmptySnap(&ready.Snapshot) {
+		kvWb := &engine_util.WriteBatch{}
+		result, err = ps.ApplySnapshot(&ready.Snapshot, kvWb, raftWB)
+		kvWb.WriteToDB(ps.Engines.Kv)
+	}
+	// store raft log
+	ps.Append(ready.Entries, raftWB)
+	// store RaftLocalState
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+	}
+	raftWB.SetMeta(meta.RaftStateKey(ps.region.GetId()), ps.raftState)
+	raftWB.WriteToDB(ps.Engines.Raft)
+	return result, err
 }
 
 func (ps *PeerStorage) ClearData() {
