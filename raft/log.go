@@ -61,11 +61,11 @@ func newLog(storage Storage) *RaftLog {
 	if err != nil {
 		panic(err)
 	}
-	lo, _ := storage.FirstIndex()
-	hi, _ := storage.LastIndex()
-	ents := make([]pb.Entry, 0)
-	if lo <= hi {
-		ents, err = storage.Entries(lo, hi+1)
+	low, _ := storage.FirstIndex()
+	high, _ := storage.LastIndex()
+	logEntries := make([]pb.Entry, 0)
+	if low <= high {
+		logEntries, err = storage.Entries(low, high+1)
 		if err != nil {
 			panic(err)
 		}
@@ -73,10 +73,10 @@ func newLog(storage Storage) *RaftLog {
 	return &RaftLog{
 		storage:    storage,
 		committed:  hardState.Commit,
-		applied:    lo - 1,
-		stabled:    hi,
-		entries:    ents,
-		firstIndex: lo,
+		applied:    low - 1,
+		stabled:    high,
+		entries:    logEntries,
+		firstIndex: low,
 	}
 }
 

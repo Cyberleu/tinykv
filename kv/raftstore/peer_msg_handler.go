@@ -192,7 +192,6 @@ func (d *peerMsgHandler) processAdminRequest(entry eraftpb.Entry, msg *raft_cmdp
 	switch req.CmdType {
 	case raft_cmdpb.AdminCmdType_CompactLog:
 		compact := req.GetCompactLog()
-		log.Debugf("%s compact log %+v", d.Tag, compact)
 		applyState := d.peerStorage.applyState
 		// update truncated state
 		if compact.CompactIndex >= applyState.TruncatedState.Index {
@@ -288,10 +287,8 @@ func (d *peerMsgHandler) processNormalRequest(entry eraftpb.Entry, msg *raft_cmd
 	switch req.CmdType {
 	case raft_cmdpb.CmdType_Put:
 		wb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
-		log.Debugf("%s set cf %s-%s-%s", d.Tag, req.Put.Cf, req.Put.Key, req.Put.Value)
 	case raft_cmdpb.CmdType_Delete:
 		wb.DeleteCF(req.Delete.Cf, req.Delete.Key)
-		log.Debugf("%s delete cf %s-%s", d.Tag, req.Delete.Cf, req.Delete.Key)
 	}
 	d.handleProposal(entry, func(p *proposal) {
 		rsp := &raft_cmdpb.RaftCmdResponse{
@@ -303,7 +300,6 @@ func (d *peerMsgHandler) processNormalRequest(entry eraftpb.Entry, msg *raft_cmd
 			wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 			wb.WriteToDB(d.peerStorage.Engines.Kv)
 			value, err := engine_util.GetCF(d.ctx.engine.Kv, req.Get.Cf, req.Get.Key)
-			log.Debugf("%s get cf %s-%s-%s", d.Tag, req.Get.Cf, req.Get.Key, value)
 			if err != nil {
 				value = nil
 			}
@@ -329,7 +325,6 @@ func (d *peerMsgHandler) processNormalRequest(entry eraftpb.Entry, msg *raft_cmd
 				},
 			}
 		case raft_cmdpb.CmdType_Snap:
-			log.Debugf("%s get snap", d.Tag)
 			if msg.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
 				p.cb.Done(ErrResp(&util.ErrEpochNotMatch{}))
 				return
@@ -344,7 +339,6 @@ func (d *peerMsgHandler) processNormalRequest(entry eraftpb.Entry, msg *raft_cmd
 					Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
 				},
 			}
-			// new transaction
 			p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
 		}
 		p.cb.Done(rsp)
@@ -563,8 +557,6 @@ func (d *peerMsgHandler) ScheduleCompactLog(truncatedIndex uint64) {
 }
 
 func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
-	log.Debugf("%s handle raft message %s from %d to %d",
-		d.Tag, msg.GetMessage().GetMsgType(), msg.GetFromPeer().GetId(), msg.GetToPeer().GetId())
 	if !d.validateRaftMessage(msg) {
 		return nil
 	}
