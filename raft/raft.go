@@ -386,6 +386,10 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	r.becomeFollower(m.Term, m.From)
 	term, err := r.RaftLog.Term(m.Index)
 	if err != nil || term != m.LogTerm {
+		if err == ErrCompacted {
+			r.sendAppendResponse(m.From, false)
+			return
+		}
 		r.sendAppendResponse(m.From, true)
 		return
 	}
@@ -439,21 +443,26 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
-	meta := m.Snapshot.Metadata
-	if meta.Index <= r.RaftLog.committed {
+	if m.Snapshot.Metadata.Index < r.RaftLog.committed {
 		r.sendAppendResponse(m.From, false)
 		return
 	}
-	r.becomeFollower(max(r.Term, m.Term), m.From)
+	r.becomeFollower(m.Term, m.From)
+	r.Term = m.Snapshot.Metadata.Term
+	r.RaftLog.committed = m.Snapshot.Metadata.Index
+	r.RaftLog.applied = m.Snapshot.Metadata.Index
+	r.RaftLog.stabled = m.Snapshot.Metadata.Index
+	r.RaftLog.firstIndex = m.Snapshot.Metadata.Index + 1
 	r.RaftLog.entries = nil
-	r.RaftLog.firstIndex = meta.Index + 1
-	r.RaftLog.applied = meta.Index
-	r.RaftLog.committed = meta.Index
-	r.RaftLog.stabled = meta.Index
 	r.RaftLog.pendingSnapshot = m.Snapshot
+	nodes := m.Snapshot.Metadata.ConfState.Nodes
 	r.Prs = make(map[uint64]*Progress)
-	for _, p := range meta.ConfState.Nodes {
-		r.Prs[p] = &Progress{}
+	for _, id := range nodes {
+		if id == r.id {
+			r.Prs[id] = &Progress{Match: r.RaftLog.committed, Next: r.RaftLog.committed + 1}
+		} else {
+			r.Prs[id] = &Progress{Match: 0, Next: r.RaftLog.committed + 1}
+		}
 	}
 	r.sendAppendResponse(m.From, false)
 }

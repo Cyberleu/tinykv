@@ -122,8 +122,13 @@ func (l *RaftLog) LastIndex() uint64 {
 	if len(l.entries) > 0 {
 		return l.entries[len(l.entries)-1].Index
 	}
+	var pendingSnapshotIndex uint64
+	if !IsEmptySnap(l.pendingSnapshot) {
+		pendingSnapshotIndex = l.pendingSnapshot.Metadata.Index
+	}
+
 	idx, _ := l.storage.FirstIndex()
-	return idx - 1
+	return max(idx-1, pendingSnapshotIndex)
 }
 
 // Term return the term of the entry in the given index
@@ -135,7 +140,16 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 		}
 		return l.entries[i-l.firstIndex].Term, nil
 	}
+	var snapTerm uint64
 	term, err := l.storage.Term(i)
+	if err == ErrUnavailable && !IsEmptySnap(l.pendingSnapshot) {
+		if i == l.pendingSnapshot.Metadata.Index {
+			snapTerm = l.pendingSnapshot.Metadata.Term
+			return snapTerm, nil
+		} else if i < l.pendingSnapshot.Metadata.Index {
+			return term, ErrCompacted
+		}
+	}
 	return term, err
 }
 

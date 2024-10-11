@@ -53,7 +53,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		if err != nil {
 			panic(err)
 		}
-		// udpate region
 		if result != nil && !reflect.DeepEqual(result.PrevRegion, result.Region) {
 			d.peerStorage.SetRegion(result.Region)
 			storeMeta := d.ctx.storeMeta
@@ -72,11 +71,9 @@ func (d *peerMsgHandler) HandleRaftReady() {
 					return
 				}
 			}
-			// apply all the entries
 			d.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].Index
 			wb.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
-			// write process result to db
-			wb.WriteToDB(d.peerStorage.Engines.Kv)
+			wb.MustWriteToDB(d.peerStorage.Engines.Kv)
 		}
 		d.RaftGroup.Advance(rd)
 	}
