@@ -1,5 +1,10 @@
 package storage
 
+const (
+	PUT = iota
+	DELETE
+)
+
 // Modify is a single modification to TinyKV's underlying storage.
 type Modify struct {
 	Data interface{}
@@ -42,4 +47,14 @@ func (m *Modify) Cf() string {
 		return m.Data.(Delete).Cf
 	}
 	return ""
+}
+
+func (m *Modify) Type() int32 {
+	switch m.Data.(type) {
+	case Put:
+		return PUT
+	case Delete:
+		return DELETE
+	}
+	return -1
 }
