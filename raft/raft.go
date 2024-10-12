@@ -189,12 +189,12 @@ func newRaft(c *Config) *Raft {
 		msgs:             make([]pb.Message, 0),
 		heartbeatTimeout: c.HeartbeatTick,
 		electionTimeout:  c.ElectionTick,
+		leadTransferee:   None,
 	}
 	lastIndex := r.RaftLog.LastIndex()
 	if c.peers == nil {
 		c.peers = confState.Nodes
 	}
-	r.Prs[r.id] = &Progress{Match: lastIndex, Next: lastIndex + 1}
 	for _, id := range c.peers {
 		if id == r.id {
 			r.Prs[id] = &Progress{Match: lastIndex, Next: lastIndex + 1}
@@ -298,6 +298,10 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgSnapshot:
 			r.handleSnapshot(m)
 		case pb.MessageType_MsgTimeoutNow:
+			_, exists := r.Prs[r.id]
+			if !exists {
+				return nil
+			}
 			r.vote()
 		case pb.MessageType_MsgTransferLeader:
 			if r.Lead != None {
@@ -386,6 +390,10 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	r.becomeFollower(m.Term, m.From)
 	term, err := r.RaftLog.Term(m.Index)
 	if err != nil || term != m.LogTerm {
+		if err == ErrCompacted {
+			r.sendAppendResponse(m.From, false)
+			return
+		}
 		r.sendAppendResponse(m.From, true)
 		return
 	}
@@ -439,21 +447,26 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
-	meta := m.Snapshot.Metadata
-	if meta.Index <= r.RaftLog.committed {
+	if m.Snapshot.Metadata.Index < r.RaftLog.committed {
 		r.sendAppendResponse(m.From, false)
 		return
 	}
-	r.becomeFollower(max(r.Term, m.Term), m.From)
+	r.becomeFollower(m.Term, m.From)
+	r.Term = m.Snapshot.Metadata.Term
+	r.RaftLog.committed = m.Snapshot.Metadata.Index
+	r.RaftLog.applied = m.Snapshot.Metadata.Index
+	r.RaftLog.stabled = m.Snapshot.Metadata.Index
+	r.RaftLog.firstIndex = m.Snapshot.Metadata.Index + 1
 	r.RaftLog.entries = nil
-	r.RaftLog.firstIndex = meta.Index + 1
-	r.RaftLog.applied = meta.Index
-	r.RaftLog.committed = meta.Index
-	r.RaftLog.stabled = meta.Index
 	r.RaftLog.pendingSnapshot = m.Snapshot
+	nodes := m.Snapshot.Metadata.ConfState.Nodes
 	r.Prs = make(map[uint64]*Progress)
-	for _, p := range meta.ConfState.Nodes {
-		r.Prs[p] = &Progress{}
+	for _, id := range nodes {
+		if id == r.id {
+			r.Prs[id] = &Progress{Match: r.RaftLog.committed, Next: r.RaftLog.committed + 1}
+		} else {
+			r.Prs[id] = &Progress{Match: 0, Next: r.RaftLog.committed + 1}
+		}
 	}
 	r.sendAppendResponse(m.From, false)
 }
@@ -602,6 +615,10 @@ func (r *Raft) sendVote() {
 }
 
 func (r *Raft) handleVoteResponse(m pb.Message) {
+	_, exists := r.Prs[r.id]
+	if !exists {
+		return
+	}
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, r.Lead)
 		r.Vote = m.From
@@ -741,27 +758,25 @@ func (r *Raft) sendSnapshot(to uint64) {
 }
 
 func (r *Raft) handleLeaderTransfer(m pb.Message) {
+	_, exists := r.Prs[m.From]
+	if !exists {
+		return
+	}
 	if m.From == r.id {
 		return
 	}
-	if r.leadTransferee == m.From {
-		return
-	}
-	if _, ok := r.Prs[m.From]; !ok {
-		return
-	}
-	r.leadTransferee = m.From
-	if r.Prs[m.From].Match != r.RaftLog.LastIndex() {
+	if r.compareLog(m.LogTerm, m.Index) {
 		r.sendAppend(m.From)
-	} else {
-		r.sendTimeoutNow(m.From)
+		r.updateCommit()
 	}
+	r.sendTimeoutNow(m.From)
 }
 
 func (r *Raft) sendTimeoutNow(to uint64) {
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgTimeoutNow,
-		To:      to,
 		From:    r.id,
+		To:      to,
+		Term:    r.Term,
 	})
 }
