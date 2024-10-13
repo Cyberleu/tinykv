@@ -173,7 +173,7 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 		}
 		if write != nil && write.StartTS == req.StartVersion {
 			iter1.Seek(mvcc.EncodeKey(key, req.CommitVersion))
-			if !iter1.Valid() || mvcc.DecodeTimestamp(iter1.Item().Key()) < req.StartVersion {
+			if write.Kind == mvcc.WriteKindRollback {
 				// 提交roll back的事务
 				res.Error = &kvrpcpb.KeyError{Conflict: &kvrpcpb.WriteConflict{StartTs: req.StartVersion, ConflictTs: ts, Key: key}, Retryable: "commit roll back conflicts"}
 			}
@@ -230,7 +230,6 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 		}
 		if res_lock.RegionError != nil {
 			res.RegionError = res_lock.RegionError
-			return res, nil
 		}
 	}
 	return res, nil
@@ -238,23 +237,247 @@ func (server *Server) KvCommit(_ context.Context, req *kvrpcpb.CommitRequest) (*
 
 func (server *Server) KvScan(_ context.Context, req *kvrpcpb.ScanRequest) (*kvrpcpb.ScanResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+	var res *kvrpcpb.ScanResponse = new(kvrpcpb.ScanResponse)
+	count := 0
+	reader, err := server.storage.Reader(req.Context)
+	txn := mvcc.NewMvccTxn(reader, req.GetVersion())
+	if err != nil {
+		return nil, err
+	}
+	scanner := mvcc.NewScanner(req.StartKey, txn)
+	for {
+		if count == int(req.Limit) {
+			break
+		}
+		key, value, err := scanner.Next()
+		if err != nil {
+			return nil, err
+		}
+		if key == nil {
+			scanner.Close()
+			break
+		}
+		res.Pairs = append(res.Pairs, &kvrpcpb.KvPair{Key: key, Value: value})
+		count++
+	}
+	return res, nil
 }
 
 func (server *Server) KvCheckTxnStatus(_ context.Context, req *kvrpcpb.CheckTxnStatusRequest) (*kvrpcpb.CheckTxnStatusResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+	var res *kvrpcpb.CheckTxnStatusResponse = new(kvrpcpb.CheckTxnStatusResponse)
+	reader, err := server.storage.Reader(req.Context)
+	txn := mvcc.NewMvccTxn(reader, req.LockTs)
+	if err != nil {
+		return nil, err
+	}
+	lock, err := txn.GetLock(req.PrimaryKey)
+	if err != nil {
+		return nil, err
+	}
+	write, ts, err := txn.CurrentWrite(req.PrimaryKey)
+	if write != nil && (write.Kind == mvcc.WriteKindPut || write.Kind == mvcc.WriteKindDelete) {
+		// 事务为已提交状态
+		res.Action = kvrpcpb.Action_NoAction
+		res.CommitVersion = ts
+	} else if write != nil && write.Kind == mvcc.WriteKindRollback {
+		// 事务为已回滚状态
+		res.Action = kvrpcpb.Action_NoAction
+		res.CommitVersion = uint64(0)
+	} else {
+		if lock == nil {
+			// pre-write丢失，进行回滚
+			res.Action = kvrpcpb.Action_LockNotExistRollback
+			rollback_res, err := server.KvBatchRollback(nil, &kvrpcpb.BatchRollbackRequest{StartVersion: req.LockTs, Keys: [][]byte{req.PrimaryKey}})
+			if err != nil {
+				return nil, err
+			}
+			res.RegionError = rollback_res.RegionError
+		} else if lock.Ttl < mvcc.PhysicalTime(req.CurrentTs) {
+			res.Action = kvrpcpb.Action_TTLExpireRollback
+			rollback_res, err := server.KvBatchRollback(nil, &kvrpcpb.BatchRollbackRequest{StartVersion: req.LockTs, Keys: [][]byte{req.PrimaryKey}})
+			if err != nil {
+				return nil, err
+			}
+			res.RegionError = rollback_res.RegionError
+		} else {
+			res.Action = kvrpcpb.Action_NoAction
+		}
+	}
+	return res, nil
 }
 
 func (server *Server) KvBatchRollback(_ context.Context, req *kvrpcpb.BatchRollbackRequest) (*kvrpcpb.BatchRollbackResponse, error) {
 	// Your Code Here (4C).
-	return nil, nil
+	var res *kvrpcpb.BatchRollbackResponse = new(kvrpcpb.BatchRollbackResponse)
+	reader, err := server.storage.Reader(req.Context)
+	txn := mvcc.NewMvccTxn(reader, req.StartVersion)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range req.Keys {
+		// v2, err := reader.GetCF(engine_util.CfDefault, mvcc.EncodeKey(key, req.StartVersion))
+		// if err != nil {
+		// 	return nil, err
+		// }
+		// v2, err := reader.GetCF(engine_util.CfLock, key)
+		// if err != nil {
+		// 	return nil, err
+		// }
+		write, _, err := txn.CurrentWrite(key)
+		if err != nil {
+			return nil, err
+		}
+		// 回滚已提交的事务报错
+		if write != nil && write.Kind != mvcc.WriteKindRollback {
+			res.Error = &kvrpcpb.KeyError{Abort: "roll back commited transaxtion"}
+			return res, nil
+		}
+		// 回滚已回滚的事务
+		if write != nil && write.Kind == mvcc.WriteKindRollback {
+			continue
+		}
+		// 回滚default
+		dr_default := &kvrpcpb.RawDeleteRequest{Key: mvcc.EncodeKey(key, req.StartVersion), Cf: engine_util.CfDefault}
+		res_default, err := server.RawDelete(nil, dr_default)
+		if err != nil {
+			return nil, err
+		}
+		if res_default.RegionError != nil {
+			res.RegionError = res_default.RegionError
+		}
+		// 进行write操作
+		write = &mvcc.Write{StartTS: req.StartVersion, Kind: mvcc.WriteKindRollback}
+		pr_write := &kvrpcpb.RawPutRequest{Key: mvcc.EncodeKey(key, req.StartVersion), Value: write.ToBytes(), Cf: engine_util.CfWrite}
+		res_write, err := server.RawPut(nil, pr_write)
+		if err != nil {
+			return res, nil
+		}
+		if res_write.RegionError != nil {
+			res.RegionError = res_write.RegionError
+		}
+	}
+	// 回滚lock
+	for _, key := range req.Keys {
+		lock, err := txn.GetLock(key)
+		if err != nil {
+			return nil, err
+		}
+		if lock != nil && lock.Ts != req.StartVersion {
+			continue
+		}
+		dr_lock := &kvrpcpb.RawDeleteRequest{Key: key, Cf: engine_util.CfLock}
+		res_lock, err := server.RawDelete(nil, dr_lock)
+		if err != nil {
+			return nil, err
+		}
+		if res_lock.RegionError != nil {
+			res.RegionError = res_lock.RegionError
+		}
+	}
+	return res, nil
 }
 
 func (server *Server) KvResolveLock(_ context.Context, req *kvrpcpb.ResolveLockRequest) (*kvrpcpb.ResolveLockResponse, error) {
-	// Your Code Here (4C).
-	return nil, nil
+	var res *kvrpcpb.ResolveLockResponse = new(kvrpcpb.ResolveLockResponse)
+	reader, err := server.storage.Reader(req.Context)
+	var keys [][]byte
+	// txn := mvcc.NewMvccTxn(reader, req.StartVersion)
+	if err != nil {
+		return nil, err
+	}
+	iter2 := reader.IterCF(engine_util.CfLock)
+	iter2.Close()
+	// 获得该事务下的所有key
+	for ; iter2.Valid(); iter2.Next() {
+		value2, err := iter2.Item().Value()
+		if err != nil {
+			return nil, err
+		}
+		lock, err := mvcc.ParseLock(value2)
+		if err != nil {
+			return nil, err
+		}
+		if lock != nil && lock.Ts == req.StartVersion {
+			keys = append(keys, iter2.Item().Key())
+		}
+	}
+	// 执行批量commit
+	if req.CommitVersion > req.StartVersion {
+		commit_res, err := server.KvCommit(nil, &kvrpcpb.CommitRequest{StartVersion: req.StartVersion, Keys: keys, CommitVersion: req.CommitVersion})
+		if err != nil {
+			return nil, err
+		}
+		res.Error = commit_res.Error
+		res.RegionError = commit_res.RegionError
+	} else {
+		// 执行批量roll back
+		rollback_res, err := server.KvBatchRollback(nil, &kvrpcpb.BatchRollbackRequest{StartVersion: req.StartVersion, Keys: keys})
+		if err != nil {
+			return nil, err
+		}
+		res.Error = rollback_res.Error
+		res.RegionError = rollback_res.RegionError
+	}
+	return res, nil
 }
+
+// func (server *Server) KvResolveLock(_ context.Context, req *kvrpcpb.ResolveLockRequest) (*kvrpcpb.ResolveLockResponse, error) {
+// 	// Your Code Here (4C).
+// 	var res *kvrpcpb.ResolveLockResponse = new(kvrpcpb.ResolveLockResponse)
+// 	reader, err := server.storage.Reader(req.Context)
+// 	txn := mvcc.NewMvccTxn(reader, req.StartVersion)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	iter1 := reader.IterCF(engine_util.CfDefault)
+// 	defer iter1.Close()
+// 	var keys [][]byte
+// 	for ; iter1.Valid(); iter1.Next() {
+// 		ts := mvcc.DecodeTimestamp(iter1.Item().Key())
+// 		if ts == req.StartVersion {
+// 			lock, err := txn.GetLock(mvcc.DecodeUserKey(iter1.Item().Key()))
+// 			if err != nil {
+// 				return nil, err
+// 			}
+// 			if lock == nil {
+// 				continue
+// 			}
+// 			write, _, err := txn.CurrentWrite(iter1.Item().Key())
+// 			// 全部提交
+// 			if write == nil {
+// 				keys = append(keys, iter1.Item().Key())
+// 				if req.CommitVersion > req.StartVersion {
+// 					write = &mvcc.Write{StartTS: req.StartVersion, Kind: mvcc.WriteKindPut}
+// 				} else {
+// 					write = &mvcc.Write{StartTS: req.StartVersion, Kind: mvcc.WriteKindRollback}
+
+// 				}
+// 				pr_write := &kvrpcpb.RawPutRequest{Key: mvcc.EncodeKey(iter1.Item().Key(), req.StartVersion), Value: write.ToBytes(), Cf: engine_util.CfWrite}
+// 				res_write, err := server.RawPut(nil, pr_write)
+// 				if err != nil {
+// 					return res, nil
+// 				}
+// 				if res_write.RegionError != nil {
+// 					res.RegionError = res_write.RegionError
+// 				}
+// 			}
+
+// 		}
+// 	}
+
+// 	for _, key := range keys {
+// 		dr_lock := &kvrpcpb.RawDeleteRequest{Key: key, Cf: engine_util.CfLock}
+// 		res_lock, err := server.RawDelete(nil, dr_lock)
+// 		if err != nil {
+// 			return nil, err
+// 		}
+// 		if res_lock.RegionError != nil {
+// 			res.RegionError = res_lock.RegionError
+// 		}
+// 	}
+// 	return res, nil
+// }
 
 // SQL push down commands.
 func (server *Server) Coprocessor(_ context.Context, req *coppb.Request) (*coppb.Response, error) {
@@ -275,3 +498,19 @@ func (server *Server) Coprocessor(_ context.Context, req *coppb.Request) (*coppb
 	}
 	return nil, nil
 }
+
+// func (server *Server) ReleaseAllLocks(keys [][]byte) error {
+// 	var err error
+// 	for _, key := range keys {
+// 		dr_lock := &kvrpcpb.RawDeleteRequest{Key: key, Cf: engine_util.CfLock}
+// 		res_lock, err := server.RawDelete(nil, dr_lock)
+// 		if err != nil {
+// 			continur
+// 		}
+// 		if res_lock.RegionError != nil {
+// 			res.RegionError = res_lock.RegionError
+// 			return res, nil
+// 		}
+// 	}
+// 	return nil
+// }
